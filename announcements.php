@@ -1,313 +1,255 @@
 <?php
 session_start();
-$mysqli = new mysqli("localhost", "root", "", "bago_app");
+require_once $_SERVER['DOCUMENT_ROOT'] . '/BaGoApp/includes/db_connection.php';
+require_once '../includes/audit_helper.php';
 
-// Handle post submission
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['announcement'])) {
-    $announcement = $_POST['announcement'];
-    $imagePath = null;
+$resident_id = $_SESSION['resident_id'] ?? null;
+if (!$resident_id) {
+    header("Location: login.php");
+    exit;
+}
 
-    if (!empty($_FILES['image']['name'])) {
-        $imageName = basename($_FILES['image']['name']);
-        $targetDir = "../uploads/";
-        $targetFile = $targetDir . $imageName;
+// ✅ Delete comment
+if (isset($_GET['delete_comment_id'])) {
+    $comment_id = intval($_GET['delete_comment_id']);
+    $stmt = $conn->prepare("DELETE FROM announcement_comments WHERE id = ? AND resident_id = ?");
+    $stmt->bind_param("ii", $comment_id, $resident_id);
+    $stmt->execute();
 
-        if (move_uploaded_file($_FILES["image"]["tmp_name"], $targetFile)) {
-            $imagePath = "uploads/" . $imageName;
-        }
+    log_audit($resident_id, "Deleted a comment on announcement", "resident");
+
+    header("Location: announcements.php");
+    exit;
+}
+
+// ✅ Update comment
+if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_comment_id'], $_POST['updated_comment'])) {
+    $comment_id = intval($_POST['update_comment_id']);
+    $updated_comment = trim($_POST['updated_comment']);
+    if ($updated_comment !== "") {
+        $stmt = $conn->prepare("UPDATE announcement_comments SET comment = ? WHERE id = ? AND resident_id = ?");
+        $stmt->bind_param("sii", $updated_comment, $comment_id, $resident_id);
+        $stmt->execute();
+
+        log_audit($resident_id, "Updated a comment on announcement", "resident");
+    }
+    header("Location: announcements.php");
+    exit;
+}
+
+// ✅ New comment
+if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['comment'], $_POST['announcement_id'])) {
+    $comment = trim($_POST['comment']);
+    $announcement_id = intval($_POST['announcement_id']);
+
+    if ($comment !== "") {
+        $stmt = $conn->prepare("INSERT INTO announcement_comments (announcement_id, resident_id, comment, created_at) VALUES (?, ?, ?, NOW())");
+        $stmt->bind_param("iis", $announcement_id, $resident_id, $comment);
+        $stmt->execute();
+
+        log_audit($resident_id, "Commented on an announcement", "resident");
+    }
+}
+
+// ✅ Like
+if (isset($_GET['like_id'])) {
+    $announcement_id = intval($_GET['like_id']);
+    $check = $conn->prepare("SELECT id FROM announcement_likes WHERE announcement_id = ? AND resident_id = ?");
+    $check->bind_param("ii", $announcement_id, $resident_id);
+    $check->execute();
+    $result = $check->get_result();
+
+    if ($result->num_rows == 0) {
+        $like = $conn->prepare("INSERT INTO announcement_likes (announcement_id, resident_id) VALUES (?, ?)");
+        $like->bind_param("ii", $announcement_id, $resident_id);
+        $like->execute();
+        $conn->query("UPDATE announcements SET likes = likes + 1 WHERE id = $announcement_id");
+
+        log_audit($resident_id, "Liked an announcement", "resident");
     }
 
-    $stmt = $mysqli->prepare("INSERT INTO announcements (content, image_path, created_at) VALUES (?, ?, NOW())");
-    $stmt->bind_param("ss", $announcement, $imagePath);
+    header("Location: announcements.php");
+    exit;
+}
+
+$announcements = $conn->query("SELECT * FROM announcements ORDER BY created_at DESC");
+
+$edit_comment_data = null;
+if (isset($_GET['edit_comment_id'])) {
+    $edit_id = intval($_GET['edit_comment_id']);
+    $stmt = $conn->prepare("SELECT comment FROM announcement_comments WHERE id = ? AND resident_id = ?");
+    $stmt->bind_param("ii", $edit_id, $resident_id);
     $stmt->execute();
-    header("Location: announcements.php");
-    exit();
+    $edit_result = $stmt->get_result();
+    if ($edit_result->num_rows > 0) {
+        $edit_comment_data = $edit_result->fetch_assoc();
+    }
 }
-
-// Handle likes
-if (isset($_GET['like_id'])) {
-    $id = $_GET['like_id'];
-    $mysqli->query("UPDATE announcements SET likes = likes + 1 WHERE id = $id");
-    header("Location: announcements.php");
-    exit();
-}
-
-// Handle delete
-if (isset($_GET['delete_announcement'])) {
-    $id = $_GET['delete_announcement'];
-    $mysqli->query("DELETE FROM announcements WHERE id = $id");
-    $mysqli->query("DELETE FROM comments WHERE announcement_id = $id");
-    header("Location: announcements.php");
-    exit();
-}
-
-if (isset($_GET['delete_comment'])) {
-    $id = $_GET['delete_comment'];
-    $mysqli->query("DELETE FROM comments WHERE id = $id");
-    header("Location: announcements.php");
-    exit();
-}
-
-// Handle comment post
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['comment'])) {
-    $announcement_id = $_POST['announcement_id'];
-    $comment = $_POST['comment'];
-    $mysqli->query("INSERT INTO comments (announcement_id, sender_name, comment, created_at) VALUES ($announcement_id, 'Admin', '$comment', NOW())");
-    header("Location: announcements.php");
-    exit();
-}
-
-// Pagination setup
-$limit = 5;
-$page = isset($_GET['page']) ? (int) $_GET['page'] : 1;
-$offset = ($page - 1) * $limit;
-
-// Filters
-$search = isset($_GET['search']) ? $mysqli->real_escape_string($_GET['search']) : '';
-$dateFilter = isset($_GET['date']) ? $mysqli->real_escape_string($_GET['date']) : '';
-
-// Build SQL with filters
-$sql = "SELECT * FROM announcements WHERE 1=1";
-$countSql = "SELECT COUNT(*) as total FROM announcements WHERE 1=1";
-
-if ($search !== '') {
-    $sql .= " AND content LIKE '%$search%'";
-    $countSql .= " AND content LIKE '%$search%'";
-}
-if ($dateFilter !== '') {
-    $sql .= " AND DATE(created_at) = '$dateFilter'";
-    $countSql .= " AND DATE(created_at) = '$dateFilter'";
-}
-$sql .= " ORDER BY created_at DESC LIMIT $limit OFFSET $offset";
-
-$result = $mysqli->query($sql);
-
-// Get total count for pagination
-$totalResult = $mysqli->query($countSql);
-$totalRow = $totalResult->fetch_assoc();
-$totalPages = ceil($totalRow['total'] / $limit);
 ?>
 
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Admin Announcements</title>
+    <title>Barangay Announcements</title>
     <style>
+        * { box-sizing: border-box; }
         body {
-            font-family: Arial, sans-serif;
             margin: 0;
-            background: #f0f2f5;
+            font-family: Arial, sans-serif;
+            display: flex;
+            background-color: #f1f1f1;
         }
         .sidebar {
-            width: 220px;
+            width: 240px;
             background-color: #002855;
-            height: 100vh;
             color: white;
+            height: 100vh;
             position: fixed;
-            padding-top: 20px;
         }
-        .sidebar img {
-            width: 100px;
-            margin: 0 auto;
-            display: block;
+        .sidebar-header {
+            background-color: #001f3f;
+            padding: 20px 15px;
+            text-align: center;
+        }
+        .sidebar-header img {
+            width: 60px;
+            height: 60px;
             border-radius: 50%;
         }
-        .sidebar h2 {
-            text-align: center;
+        .sidebar-header h2 {
             font-size: 18px;
-            margin: 10px 0;
+            margin: 0;
         }
         .sidebar a {
             display: block;
             color: white;
-            padding: 10px 20px;
             text-decoration: none;
+            padding: 14px 20px;
         }
-        .sidebar a:hover {
-            background: #00509e;
+        .sidebar a:hover, .sidebar a.active {
+            background-color: #00509e;
         }
-
-        .main {
-            margin-left: 240px;
+        .main-content {
+            margin-left: 250px;
             padding: 20px;
-            max-width: 800px;
-        }
-
-        .post-form {
-            background: white;
-            padding: 15px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-        }
-
-        .post-form textarea {
             width: 100%;
-            padding: 10px;
-            resize: none;
         }
-
-        .search-bar {
-            display: flex;
-            gap: 10px;
+        h2 {
+            color:rgb(250, 245, 245);
             margin-bottom: 20px;
         }
-
-        .search-bar input[type="text"],
-        .search-bar input[type="date"] {
-            padding: 8px;
-            flex: 1;
-        }
-
         .announcement {
             background: white;
-            padding: 15px;
+            padding: 20px;
             margin-bottom: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+            border-radius: 10px;
+            box-shadow: 0 0 4px rgba(0,0,0,0.1);
         }
-
         .announcement img {
             max-width: 100%;
-            margin-top: 10px;
-        }
-
-        .comment-section {
-            margin-top: 10px;
-            padding-left: 20px;
-        }
-
-        .comment {
-            background: #f5f5f5;
-            padding: 8px;
-            margin-bottom: 5px;
             border-radius: 5px;
         }
-
-        form.comment-form {
-            display: flex;
-            gap: 10px;
+        .meta {
+            font-size: 12px;
+            color: gray;
+        }
+        .likes {
             margin-top: 10px;
         }
-
-        form.comment-form input[type="text"] {
-            flex: 1;
-            padding: 8px;
+        .comment-section {
+            margin-top: 15px;
         }
-
-        .action-links {
-            font-size: 13px;
+        .comment {
+            background: #f9f9f9;
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 5px;
         }
-        .action-links a {
-            margin-right: 10px;
-            color: #00509e;
-            text-decoration: none;
+        .comment small {
+            color: gray;
         }
-        .action-links a:hover {
-            text-decoration: underline;
+        .comment-form textarea {
+            width: 100%;
+            height: 50px;
         }
-
-        .pagination {
-            margin-top: 20px;
-            text-align: center;
-        }
-
-        .pagination a {
-            margin: 0 5px;
-            padding: 6px 12px;
-            background: #00509e;
-            color: white;
-            text-decoration: none;
-            border-radius: 4px;
-        }
-
-        .pagination a.active {
-            background: #003f7d;
-            pointer-events: none;
-        }
-
-        .pagination a:hover {
-            background: #003f7d;
+        .comment-form button {
+            margin-top: 5px;
         }
     </style>
 </head>
 <body>
-
 <div class="sidebar">
-    <img src="../images/bago_logo.png" alt="Logo">
-    <h2>BaGo Admin</h2>
+    <div class="sidebar-header">
+        <img src="../images/bago_logo.png" alt="Logo">
+        <h2>Residents Panel</h2>
+    </div>
     <a href="dashboard.php">Dashboard</a>
-    <a href="residents.php">Residents</a>
+    <a href="view_residents.php">View Residents</a>
     <a href="certificates.php">Certificates</a>
-    <a href="announcements.php">Announcements</a>
+    <a href="announcements.php" class="active">Announcements</a>
+    <a href="digital_id.php">View Digital ID</a>
     <a href="messages.php">Messages</a>
-    <a href="reports.php">Reports</a>
-    <a href="audit_trail.php">Audit Trail</a>
+    <a href="profile.php">My Profile</a>
     <a href="../logout.php">Logout</a>
 </div>
 
-<div class="main">
-    <h1>Post an Announcement</h1>
+<div class="main-content">
+    <h2>📢 Barangay Announcements</h2>
 
-    <form method="POST" enctype="multipart/form-data" class="post-form">
-        <textarea name="announcement" rows="3" placeholder="Write an announcement..." required></textarea>
-        <input type="file" name="image" accept="image/*"><br><br>
-        <button type="submit">Post</button>
-    </form>
+    <?php while ($row = $announcements->fetch_assoc()): ?>
+        <?php
+        $stmt = $conn->prepare("SELECT ac.*, r.first_name FROM announcement_comments ac JOIN residents r ON ac.resident_id = r.id WHERE ac.announcement_id = ? ORDER BY ac.created_at ASC");
+        $stmt->bind_param("i", $row['id']);
+        $stmt->execute();
+        $comments = $stmt->get_result();
+        ?>
 
-    <!-- Search and Filter Form -->
-    <form method="GET" class="search-bar">
-        <input type="text" name="search" placeholder="Search announcements..." value="<?= htmlspecialchars($search) ?>">
-        <input type="date" name="date" value="<?= htmlspecialchars($dateFilter) ?>">
-        <button type="submit">Search</button>
-    </form>
-
-    <?php while ($a = $result->fetch_assoc()): ?>
         <div class="announcement">
-            <p><?= nl2br(htmlspecialchars($a['content'])) ?></p>
-            <?php if ($a['image_path']): ?>
-                <img src="../<?= $a['image_path'] ?>" alt="Announcement image">
+            <p><?= nl2br(htmlspecialchars($row['content'])) ?></p>
+            <?php if (!empty($row['image_path']) && file_exists($_SERVER['DOCUMENT_ROOT'] . "/BaGoApp/uploads/" . $row['image_path'])): ?>
+                <img src="/BaGoApp/uploads/<?= htmlspecialchars($row['image_path']) ?>" alt="Announcement Image">
+            <?php else: ?>
+                <p><i>No image attached.</i></p>
             <?php endif; ?>
-            <p><em>Posted by Admin | <?= date("F j, Y g:i A", strtotime($a['created_at'])) ?></em></p>
-            <p class="action-links">
-                <a href="?like_id=<?= $a['id'] ?>">👍 Like (<?= $a['likes'] ?>)</a>
-                <a href="?delete_announcement=<?= $a['id'] ?>" onclick="return confirm('Delete this announcement?')">🗑 Delete</a>
-            </p>
+            <p class="meta">Posted on <?= date("F j, Y g:i A", strtotime($row['created_at'])) ?></p>
 
-            <!-- Comment Section -->
+            <div class="likes">
+                ❤️ <?= $row['likes'] ?> likes
+                <a href="?like_id=<?= $row['id'] ?>">Like</a>
+            </div>
+
             <div class="comment-section">
-                <?php
-                $comments = $mysqli->query("SELECT * FROM comments WHERE announcement_id = {$a['id']} ORDER BY created_at ASC");
-                while ($c = $comments->fetch_assoc()):
-                ?>
+                <strong>Comments:</strong>
+                <?php while ($comment = $comments->fetch_assoc()): ?>
                     <div class="comment">
-                        <strong><?= $c['sender_name'] ?>:</strong> <?= htmlspecialchars($c['comment']) ?>
-                        <div class="action-links">
-                            <a href="?delete_comment=<?= $c['id'] ?>" onclick="return confirm('Delete this comment?')">🗑 Delete</a>
-                        </div>
+                        <strong><?= htmlspecialchars($comment['firstname']) ?>:</strong> <?= htmlspecialchars($comment['comment']) ?>
+                        <br><small><?= date("M j, Y g:i A", strtotime($comment['created_at'])) ?></small>
+
+                        <?php if ($comment['resident_id'] == $resident_id): ?>
+                            <br>
+                            <a href="?edit_comment_id=<?= $comment['id'] ?>">Edit</a> |
+                            <a href="?delete_comment_id=<?= $comment['id'] ?>" onclick="return confirm('Delete this comment?')">Delete</a>
+                        <?php endif; ?>
                     </div>
                 <?php endwhile; ?>
 
-                <!-- Comment Form -->
-                <form method="POST" class="comment-form">
-                    <input type="hidden" name="announcement_id" value="<?= $a['id'] ?>">
-                    <input type="text" name="comment" placeholder="Write a comment..." required>
-                    <button type="submit">Reply</button>
-                </form>
+                <?php if ($edit_comment_data): ?>
+                    <form method="POST" class="comment-form">
+                        <input type="hidden" name="update_comment_id" value="<?= htmlspecialchars($_GET['edit_comment_id']) ?>">
+                        <textarea name="updated_comment" required><?= htmlspecialchars($edit_comment_data['comment']) ?></textarea>
+                        <button type="submit">Update Comment</button>
+                        <a href="announcements.php">Cancel</a>
+                    </form>
+                <?php else: ?>
+                    <form method="POST" class="comment-form">
+                        <input type="hidden" name="announcement_id" value="<?= $row['id'] ?>">
+                        <textarea name="comment" placeholder="Add a comment..." required></textarea>
+                        <button type="submit">Comment</button>
+                    </form>
+                <?php endif; ?>
             </div>
         </div>
     <?php endwhile; ?>
-
-    <!-- Pagination -->
-    <div class="pagination">
-        <?php for ($p = 1; $p <= $totalPages; $p++): ?>
-            <a href="?page=<?= $p ?>&search=<?= urlencode($search) ?>&date=<?= $dateFilter ?>" class="<?= $p == $page ? 'active' : '' ?>">
-                <?= $p ?>
-            </a>
-        <?php endfor; ?>
-    </div>
 </div>
-
 </body>
 </html>
-
-   

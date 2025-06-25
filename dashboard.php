@@ -1,49 +1,29 @@
 <?php
-require_once '../includes/db_connection.php';
-require_once 'auth_session.php';
+session_start();
+require_once $_SERVER['DOCUMENT_ROOT'] . '/BaGoApp/includes/db_connection.php';
+require_once '../includes/audit_helper.php';
 
-// Gender count
-$genderQuery = "SELECT gender, COUNT(*) as count FROM residents GROUP BY gender";
-$genderResult = mysqli_query($conn, $genderQuery);
-$genderData = [];
-while ($row = mysqli_fetch_assoc($genderResult)) {
-    $genderData[$row['gender']] = $row['count'];
+$residentId = $_SESSION['resident_id'] ?? null;
+if (!$residentId) {
+    header("Location: login.php");
+    exit;
 }
 
-// Age group count
-$ageGroups = [
-    '0-17' => 0,
-    '18-30' => 0,
-    '31-45' => 0,
-    '46-60' => 0,
-    '61+' => 0
-];
-$ageQuery = "SELECT birthday FROM residents";
-$ageResult = mysqli_query($conn, $ageQuery);
-$today = new DateTime();
-while ($row = mysqli_fetch_assoc($ageResult)) {
-    $birthDate = new DateTime($row['birthday']);
-    $age = $today->diff($birthDate)->y;
-    if ($age <= 17) $ageGroups['0-17']++;
-    elseif ($age <= 30) $ageGroups['18-30']++;
-    elseif ($age <= 45) $ageGroups['31-45']++;
-    elseif ($age <= 60) $ageGroups['46-60']++;
-    else $ageGroups['61+']++;
-}
+// ✅ Log page visit
+log_audit($residentId, 'Visited Dashboard', 'resident');
 
-// Voter status
-$voterQuery = "SELECT voter_status, COUNT(*) as count FROM residents GROUP BY voter_status";
-$voterResult = mysqli_query($conn, $voterQuery);
-$voterData = [];
-while ($row = mysqli_fetch_assoc($voterResult)) {
-    $voterData[$row['voter_status']] = $row['count'];
-}
-
-// Total population
-$totalQuery = "SELECT COUNT(*) as total FROM residents";
-$totalResult = mysqli_query($conn, $totalQuery);
-$totalRow = mysqli_fetch_assoc($totalResult);
-$totalPopulation = $totalRow['total'];
+// Fetch data for demographics
+$genderData = $conn->query("SELECT gender, COUNT(*) as count FROM residents GROUP BY gender");
+$ageData = $conn->query("SELECT 
+    CASE 
+        WHEN TIMESTAMPDIFF(YEAR, birthday, CURDATE()) BETWEEN 0 AND 12 THEN 'Child (0-12)'
+        WHEN TIMESTAMPDIFF(YEAR, birthday, CURDATE()) BETWEEN 13 AND 19 THEN 'Teen (13-19)'
+        WHEN TIMESTAMPDIFF(YEAR, birthday, CURDATE()) BETWEEN 20 AND 59 THEN 'Adult (20-59)'
+        ELSE 'Senior (60+)' 
+    END as age_group, COUNT(*) as count 
+    FROM residents GROUP BY age_group");
+$voterData = $conn->query("SELECT voter_status, COUNT(*) as count FROM residents GROUP BY voter_status");
+$totalResidents = $conn->query("SELECT COUNT(*) as total FROM residents")->fetch_assoc()['total'];
 ?>
 
 <!DOCTYPE html>
@@ -96,29 +76,40 @@ $totalPopulation = $totalRow['total'];
         .sidebar a.active {
             background-color: #00509e;
         }
+        
 
-        .content {
-            margin-left: 240px;
-            padding: 20px;
-            width: calc(100% - 240px);
+        .main {
+            margin-left: 220px;
+            padding: 30px;
+            flex: 1;
         }
 
         h1 {
+            margin-bottom: 20px;
             color: #002855;
         }
 
-        .card {
-            background: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 0 10px rgba(0,0,0,0.05);
-            margin-bottom: 20px;
-        }
-
-        .charts-container {
+        .charts {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 20px;
+            gap: 30px;
+        }
+
+        .chart-card {
+            background: #f9f9f9;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+        }
+
+        .chart-card h3 {
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        canvas {
+            width: 100% !important;
+            height: auto !important;
         }
     </style>
 </head>
@@ -127,93 +118,82 @@ $totalPopulation = $totalRow['total'];
 <div class="sidebar">
     <div class="sidebar-header">
         <img src="../images/bago_logo.png" alt="App Logo">
-        <h2>Admin Panel</h2>
+        <h2>Residents Panel</h2>
    </div>
     <a href="dashboard.php" class="<?= basename($_SERVER['PHP_SELF']) == 'dashboard.php' ? 'active' : '' ?>">Dashboard</a>
-    <a href="residents.php" class="<?= basename($_SERVER['PHP_SELF']) == 'residents.php' ? 'active' : '' ?>">Residents</a>
-   <?php
-// Count new/pending requests
-$notifResult = $conn->query("SELECT COUNT(*) as total FROM certificates WHERE status = 'pending'");
-$notifCount = $notifResult->fetch_assoc()['total'];
-?>
-
-<a href="certificates.php" class="active">
-    Certificates
-    <?php if ($notifCount > 0): ?>
-        <span style="background:red; color:white; border-radius:50%; padding:3px 7px; font-size:12px; margin-left:5px;">
-            <?= $notifCount ?>
-        </span>
-    <?php endif; ?>
-</a>
+    <a href="view_residents.php" class="<?= basename($_SERVER['PHP_SELF']) == 'view_residents.php' ? 'active' : '' ?>">View Residents</a>
+    <a href="certificates.php" class="<?= basename($_SERVER['PHP_SELF']) == 'certificates.php' ? 'active' : '' ?>">Certificates</a>
     <a href="announcements.php" class="<?= basename($_SERVER['PHP_SELF']) == 'announcements.php' ? 'active' : '' ?>">Announcements</a>
+     <a href="digital_id.php" class="<?= basename($_SERVER['PHP_SELF']) == 'digital_id.php' ? 'active' : '' ?>">View Digital ID</a>
     <a href="messages.php" class="<?= basename($_SERVER['PHP_SELF']) == 'messages.php' ? 'active' : '' ?>">Messages</a>
-    <a href="reports.php" class="<?= basename($_SERVER['PHP_SELF']) == 'reports.php' ? 'active' : '' ?>">Reports</a>
-    <a href="audit_trail.php" class="<?= basename($_SERVER['PHP_SELF']) == 'audit_trail.php' ? 'active' : '' ?>">Audit Trail</a>
+    <a href="profile.php" class="<?= basename($_SERVER['PHP_SELF']) == 'ptofile.php' ? 'active' : '' ?>">My Profile</a>
+
     <a href="../logout.php">Logout</a>
 </div>
+<div class="main">
+    <h1>Demographic Overview</h1>
 
-<div class="content">
-    <h1>BaGo Demographic Dashboard</h1>
-
-    <div class="card">
-        <h2>Total Population</h2>
-        <p><?= $totalPopulation ?> residents</p>
-    </div>
-
-    <div class="charts-container">
-        <div class="card">
+    <div class="charts">
+        <div class="chart-card">
             <h3>Gender Distribution</h3>
             <canvas id="genderChart"></canvas>
         </div>
-
-        <div class="card">
-            <h3>Age Groups</h3>
+        <div class="chart-card">
+            <h3>Age Group</h3>
             <canvas id="ageChart"></canvas>
         </div>
-
-        <div class="card">
+        <div class="chart-card">
             <h3>Voter Status</h3>
             <canvas id="voterChart"></canvas>
+        </div>
+        <div class="chart-card">
+            <h3>Total Population</h3>
+            <canvas id="totalChart"></canvas>
         </div>
     </div>
 </div>
 
 <script>
-    const genderChart = new Chart(document.getElementById('genderChart'), {
-        type: 'pie',
-        data: {
-            labels: <?= json_encode(array_keys($genderData)) ?>,
-            datasets: [{
-                label: 'Gender',
-                data: <?= json_encode(array_values($genderData)) ?>,
-                backgroundColor: ['#007bff', '#dc3545', '#ffc107']
-            }]
-        }
-    });
+    const genderData = {
+        labels: [<?php while ($row = $genderData->fetch_assoc()) echo "'{$row['gender']}',"; ?>],
+        datasets: [{
+            label: 'Gender Count',
+            data: [<?php $genderData->data_seek(0); while ($row = $genderData->fetch_assoc()) echo "{$row['count']},"; ?>],
+            backgroundColor: ['#0066cc', '#ff6666', '#cccccc']
+        }]
+    };
 
-    const ageChart = new Chart(document.getElementById('ageChart'), {
-        type: 'bar',
-        data: {
-            labels: <?= json_encode(array_keys($ageGroups)) ?>,
-            datasets: [{
-                label: 'Age Group',
-                data: <?= json_encode(array_values($ageGroups)) ?>,
-                backgroundColor: '#28a745'
-            }]
-        }
-    });
+    const ageData = {
+        labels: [<?php while ($row = $ageData->fetch_assoc()) echo "'{$row['age_group']}',"; ?>],
+        datasets: [{
+            label: 'Age Group Count',
+            data: [<?php $ageData->data_seek(0); while ($row = $ageData->fetch_assoc()) echo "{$row['count']},"; ?>],
+            backgroundColor: ['#ffd166', '#06d6a0', '#118ab2', '#ef476f']
+        }]
+    };
 
-    const voterChart = new Chart(document.getElementById('voterChart'), {
-        type: 'doughnut',
-        data: {
-            labels: <?= json_encode(array_keys($voterData)) ?>,
-            datasets: [{
-                label: 'Voter Status',
-                data: <?= json_encode(array_values($voterData)) ?>,
-                backgroundColor: ['#17a2b8', '#6c757d']
-            }]
-        }
-    });
+    const voterData = {
+        labels: [<?php while ($row = $voterData->fetch_assoc()) echo "'{$row['voter_status']}',"; ?>],
+        datasets: [{
+            label: 'Voter Status',
+            data: [<?php $voterData->data_seek(0); while ($row = $voterData->fetch_assoc()) echo "{$row['count']},"; ?>],
+            backgroundColor: ['#2a9d8f', '#e76f51']
+        }]
+    };
+
+    const totalData = {
+        labels: ['Total Residents'],
+        datasets: [{
+            label: 'Population',
+            data: [<?= $totalResidents ?>],
+            backgroundColor: ['#264653']
+        }]
+    };
+
+    new Chart(document.getElementById('genderChart'), { type: 'pie', data: genderData });
+    new Chart(document.getElementById('ageChart'), { type: 'bar', data: ageData });
+    new Chart(document.getElementById('voterChart'), { type: 'doughnut', data: voterData });
+    new Chart(document.getElementById('totalChart'), { type: 'bar', data: totalData });
 </script>
 
 </body>

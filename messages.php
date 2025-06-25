@@ -1,179 +1,231 @@
 <?php
-$mysqli = new mysqli("localhost", "root", "", "bago_app");
-if ($mysqli->connect_error) {
-    die("Connection failed: " . $mysqli->connect_error);
+require_once $_SERVER['DOCUMENT_ROOT'] . '/BaGoApp/residents_auth/auth_session.php';
+require_once $_SERVER['DOCUMENT_ROOT'] . '/BaGoApp/includes/db_connection.php';
+require_once '../includes/audit_helper.php';
+
+$resident_id = $_SESSION['resident_id'] ?? null;
+
+// ✅ Log audit only if resident is logged in
+if ($resident_id) {
+    log_audit($resident_id, 'Resident accessed Messages', 'resident');
 }
 
-$search = $_GET['search'] ?? '';
-$selectedSenderId = $_GET['sender_id'] ?? null;
-$viewArchived = isset($_GET['archived']) && $_GET['archived'] == 1;
+// ✅ Handle message send
+if ($_SERVER["REQUEST_METHOD"] === "POST" && !empty($_POST['message']) && $resident_id) {
+    $message = trim($_POST['message']);
 
-// Delete conversation
-if (isset($_POST['delete_conversation'])) {
-    $senderId = intval($_POST['sender_id']);
-    $mysqli->query("DELETE FROM messages WHERE sender_id = $senderId");
-    header("Location: messages.php");
-    exit;
-}
-
-// Archive conversation
-if (isset($_POST['archive_conversation'])) {
-    $senderId = intval($_POST['sender_id']);
-    $mysqli->query("UPDATE messages SET archived = 1 WHERE sender_id = $senderId");
-    header("Location: messages.php");
-    exit;
-}
-
-// Count unread messages for notification
-$unreadCount = $mysqli->query("SELECT COUNT(*) as total FROM messages WHERE is_read = 0 AND receiver_id = 0 AND archived = 0")->fetch_assoc()['total'];
-
-// Fetch latest messages (grouped)
-$archivedFlag = $viewArchived ? 1 : 0;
-$latestMessages = $mysqli->query("
-    SELECT m1.*
-    FROM messages m1
-    INNER JOIN (
-        SELECT sender_id, MAX(sent_at) AS latest
-        FROM messages
-        WHERE archived = $archivedFlag
-        GROUP BY sender_id
-    ) m2 ON m1.sender_id = m2.sender_id AND m1.sent_at = m2.latest
-    JOIN residents r ON m1.sender_id = r.id
-    WHERE (CONCAT(r.first_name, ' ', r.last_name) LIKE '%$search%' OR r.id LIKE '%$search%')
-    AND m1.archived = $archivedFlag
-    ORDER BY m1.sent_at DESC
-");
-
-// Fetch conversation
-$conversation = [];
-if ($selectedSenderId) {
-   $stmt = $mysqli->prepare("SELECT m.*, 
-    CASE 
-        WHEN m.sender_id = 0 THEN 'Admin'
-        ELSE r.first_name 
-    END AS sender_name
-    FROM messages m
-    LEFT JOIN residents r ON m.sender_id = r.id
-    WHERE (m.sender_id = ? OR m.receiver_id = ?) OR (m.sender_id = 0 AND m.receiver_id = ?)
-    ORDER BY m.sent_at ASC");
-$stmt->bind_param("iii", $selectedSenderId, $selectedSenderId, $selectedSenderId);
+    $stmt = $conn->prepare("INSERT INTO messages (sender_id, receiver_id, message, sent_at) VALUES (?, 0, ?, NOW())");
+    $stmt->bind_param("is", $resident_id, $message);
     $stmt->execute();
-    $conversation = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
-
-    $mysqli->query("UPDATE messages SET is_read = 1 WHERE sender_id = $selectedSenderId AND receiver_id = 0");
+    $stmt->close();
 }
 ?>
 
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Messages | BaGo Admin</title>
+    <title>Messages | BaGo Resident</title>
     <style>
-        body { font-family: Arial; margin: 0; display: flex; }
-        .sidebar { width: 220px; background: #002855; color: #fff; height: 100vh; padding-top: 20px; position: fixed; text-align: center; }
-        .sidebar img.logo { width: 60px; height: 60px; border-radius: 50%; margin-bottom: 10px; object-fit: cover; }
-        .sidebar h2 { margin: 10px 0; font-size: 20px; }
-        .sidebar a { display: block; padding: 12px 20px; color: #fff; text-decoration: none; text-align: left; position: relative; }
-        .sidebar a:hover, .sidebar a.active { background: #00509e; }
-        .notification-badge {
-            position: absolute;
-            top: 10px;
-            right: 15px;
-            background: red;
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            display: flex;
+            background-color: #f9f9f9;
+        }
+        .sidebar {
+            width: 240px;
+            background-color: #002855;
             color: white;
+            height: 100vh;
+            position: fixed;
+            padding-top: 0;
+        }
+        .sidebar-header {
+            background-color: #001f3f;
+            padding: 20px 15px;
+            text-align: center;
+        }
+        .sidebar-header img {
+            width: 60px;
+            height: 60px;
             border-radius: 50%;
-            padding: 3px 7px;
-            font-size: 12px;
+        }
+        .sidebar-header h2 {
+            font-size: 18px;
+            margin: 10px 0 0;
+        }
+        .sidebar a {
+            display: block;
+            color: white;
+            text-decoration: none;
+            padding: 14px 20px;
+        }
+        .sidebar a:hover, .sidebar a.active {
+            background-color: #00509e;
         }
 
-        .content { margin-left: 220px; display: flex; width: calc(100% - 220px); height: 100vh; }
-        .message-list { width: 35%; border-right: 1px solid #ccc; padding: 20px; overflow-y: auto; }
-        .message-item { background:rgb(247, 243, 243); padding: 10px; margin-bottom: 10px; border-radius: 8px; cursor: pointer; }
-        .message-item.unread { background-color: #d6e9ff; }
-        .message-item strong { color: #002855; }
-        .message-view { flex: 1; display: flex; flex-direction: column; padding: 20px; }
-        .conversation { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
-        .message-bubble { padding: 10px; border-radius: 15px; max-width: 70%; font-size: 14px; }
-        .from-resident { background: #f0f0f0; align-self: flex-start; }
-        .from-admin { background: #002855; color: #fff; align-self: flex-end; }
-        .reply-form { margin-top: 10px; display: flex; gap: 10px; }
-        .reply-form textarea { flex: 1; padding: 10px; }
-        .reply-form button { background: #002855; color: #fff; padding: 10px 20px; border: none; cursor: pointer; }
-        .conversation-actions { margin-bottom: 10px; display: flex; justify-content: flex-end; gap: 10px; }
-        .conversation-actions form { display: inline; }
-        .conversation-actions button { background: #555; color: #fff; padding: 5px 10px; border: none; cursor: pointer; border-radius: 5px; }
-        .archive-toggle { text-align: center; margin: 10px; }
-    </style>
-    <script>
-        function confirmDelete() {
-            return confirm("Are you sure you want to delete this conversation?");
+        .main {
+            margin-left: 240px;
+            padding: 30px;
+            width: calc(100% - 240px);
         }
-    </script>
+
+        .chat-box {
+            height: 400px;
+            overflow-y: auto;
+            border: 1px solid #ccc;
+            padding: 15px;
+            background-color: #fff;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .message {
+            margin-bottom: 10px;
+            max-width: 70%;
+            padding: 10px 15px;
+            border-radius: 20px;
+            word-wrap: break-word;
+            position: relative;
+        }
+
+        .message.resident {
+            background-color:rgb(133, 92, 92);
+            color: white;
+            align-self: flex-end;
+            border-bottom-right-radius: 0;
+        }
+
+        .message.admin {
+            background-color:rgb(62, 86, 133);
+            color: #333;
+            align-self: flex-start;
+            border-bottom-left-radius: 0;
+        }
+
+        .delete-btn {
+            position: absolute;
+            top: 5px;
+            right: 10px;
+            background: transparent;
+            color: white;
+            border: none;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .message.admin .delete-btn {
+            display: none;
+        }
+
+        .chat-form {
+            display: flex;
+            gap: 10px;
+        }
+
+        .chat-form input[type="text"] {
+            flex: 1;
+            padding: 10px;
+            font-size: 14px;
+        }
+
+        .chat-form input[type="submit"] {
+            padding: 10px 15px;
+            font-size: 14px;
+            background-color: #00509e;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+
+        .chat-form input[type="submit"]:hover {
+            background-color:rgb(24, 27, 29);
+        }
+        .chat-box {
+    display: flex;
+    flex-direction: column;
+}
+#chat-box {
+  border: 1px solid red;
+  color: black;
+  padding: 10px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+
+.message {
+    max-width: 70%;
+    overflow-wrap: break-word;
+    padding: 12px;
+    margin-bottom: 12px;
+    border-radius: 8px;
+    font-size: 14px;
+    line-height: 1.4;
+}
+
+.message.resident {
+    background-color:rgb(40, 58, 61);
+    align-self: flex-end;
+    text-align: right;
+}
+
+.message.admin {
+    background-color: #f8d7da;
+    align-self: flex-start;
+}
+    </style>
 </head>
 <body>
 
 <div class="sidebar">
-    <img src="../images/bago_logo.png" alt="Logo" class="logo">
-    <h2>Admin Panel</h2>
+    <div class="sidebar-header">
+        <img src="../images/bago_logo.png" alt="Logo">
+        <h2>Residents Panel</h2>
+    </div>
     <a href="dashboard.php">Dashboard</a>
-    <a href="residents.php">Residents</a>
+    <a href="view_residents.php">View Residents</a>
     <a href="certificates.php">Certificates</a>
     <a href="announcements.php">Announcements</a>
-    <a href="messages.php" class="active">
-        Messages
-        <?php if ($unreadCount > 0): ?>
-            <span class="notification-badge"><?= $unreadCount ?></span>
-        <?php endif; ?>
-    </a>
-     <a href="reports.php">Reports</a>
-      <a href="audit_trail.php">Audit Trail</a>
+    <a href="digital_id.php">View Digital ID</a>
+    <a href="messages.php" class="active">Messages</a>
+    <a href="profile.php">My Profile</a>
     <a href="../logout.php">Logout</a>
 </div>
 
-<div class="content">
-    <div class="message-list">
-        <form method="get">
-            <input type="text" name="search" placeholder="Search..." value="<?= htmlspecialchars($search) ?>" style="width:100%; padding: 10px;">
-        </form>
-        <div class="archive-toggle">
-            <a href="messages.php?archived=<?= $viewArchived ? 0 : 1 ?>" style="text-decoration: none;"><?= $viewArchived ? 'View Active' : 'View Archived' ?></a>
-        </div>
-        <?php while ($msg = $latestMessages->fetch_assoc()): ?>
-            <a href="?sender_id=<?= $msg['sender_id'] ?>" style="text-decoration: none;">
-                <div class="message-item <?= $msg['is_read'] ? '' : 'unread' ?>">
-                    <strong><?= htmlspecialchars($msg['sender_id']) ?> - <?= htmlspecialchars($msg['message']) ?></strong><br>
-                    <small><em><?= $msg['sent_at'] ?></em></small>
-                </div>
-            </a>
-        <?php endwhile; ?>
+<div class="main">
+    <h2>Messages</h2>
+
+    <!-- ✅ Message container -->
+    <div id="chat-box" class="chat-box">
+        <!-- Messages will be loaded here -->
     </div>
 
-    <div class="message-view">
-        <?php if (!empty($conversation)): ?>
-            <div class="conversation-actions">
-                <form method="POST"><input type="hidden" name="sender_id" value="<?= $selectedSenderId ?>"><button name="archive_conversation">Archive</button></form>
-                <form method="POST" onsubmit="return confirmDelete();"><input type="hidden" name="sender_id" value="<?= $selectedSenderId ?>"><button name="delete_conversation">Delete</button></form>
-            </div>
-            <div class="conversation">
-                <?php foreach ($conversation as $msg): ?>
-                    <div class="message-bubble <?= $msg['receiver_id'] == 0 ? 'from-resident' : 'from-admin' ?>">
-                        <strong><?= $msg['receiver_id'] == 0 ? $msg['sender_id'] . ' ' . $msg['receiver_id'] : 'Admin' ?>:</strong><br>
-                        <?= nl2br(htmlspecialchars($msg['message'])) ?><br>
-                        <small><em><?= $msg['sent_at'] ?></em></small>
-                    </div>
-                <?php endforeach; ?>
-            </div>
-            <form action="send_reply.php" method="POST" class="reply-form">
-                <input type="hidden" name="receiver_id" value="<?= $selectedSenderId ?>">
-                <textarea name="message" rows="3" placeholder="Type your reply..." required></textarea>
-                <button type="submit">Send</button>
-            </form>
-        <?php else: ?>
-            <p style="color:#777;">Select a conversation to view and reply.</p>
-        <?php endif; ?>
-    </div>
+    <!-- ✅ Message form -->
+    <form method="POST" class="chat-form">
+        <input type="text" name="message" placeholder="Type your message..." required>
+        <input type="submit" value="Send">
+    </form>
 </div>
 
+<script>
+function fetchMessages() {
+    fetch('fetch_message.php')
+        .then(response => response.text())
+        .then(data => {
+            document.getElementById('chat-box').innerHTML = data;
+            // Optional: scroll to latest message
+            const chatBox = document.getElementById('chat-box');
+            chatBox.scrollTop = chatBox.scrollHeight;
+        })
+        .catch(error => console.error('Fetch error:', error));
+}
+
+window.onload = fetchMessages;
+setInterval(fetchMessages, 3000);
+</script>
 </body>
 </html>
