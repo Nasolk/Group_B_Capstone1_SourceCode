@@ -1,62 +1,73 @@
 <?php
 session_start();
 require_once $_SERVER['DOCUMENT_ROOT'] . '/BaGoApp/includes/db_connection.php';
+require_once '../includes/audit_helper.php';
 
-// Approve request
-if (isset($_GET['approve'])) {
-    $id = intval($_GET['approve']);
-    $conn->query("UPDATE certificates SET status='approved' WHERE id=$id");
-    echo "<script>location.href='certificates.php';</script>";
+$residentId = $_SESSION['resident_id'] ?? null;
+if (!$residentId) {
+    header("Location: login.php");
     exit;
 }
 
-// Deny request
-if (isset($_GET['deny'])) {
-    $id = intval($_GET['deny']);
-    $conn->query("UPDATE certificates SET status='denied' WHERE id=$id");
-    echo "<script>location.href='certificates.php';</script>";
+// ✅ Optional: Log page visit
+log_audit($residentId, 'Visited Certificate Request Page', 'resident');
+
+$notification = null;
+
+// ✅ Handle new request submission
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['certificate_type'], $_POST['purpose'])) {
+    $type = $_POST['certificate_type'];
+    $purpose = trim($_POST['purpose']);
+
+    $stmt = $conn->prepare("INSERT INTO certificates (resident_id, certificate_type, purpose, status, request_date) VALUES (?, ?, ?, 'pending', NOW())");
+    $stmt->bind_param("iss", $residentId, $type, $purpose);
+    $stmt->execute();
+    $stmt->close();
+
+    // ✅ Log the request submission
+    log_audit($residentId, "Requested a certificate: $type - Purpose: $purpose", 'resident');
+
+    // ✅ Redirect to prevent resubmission
+    header("Location: certificates.php?requested=1");
     exit;
 }
 
-// Delete request
-if (isset($_GET['delete'])) {
-    $id = intval($_GET['delete']);
-    $conn->query("DELETE FROM certificates WHERE id=$id");
-    echo "<script>location.href='certificates.php';</script>";
-    exit;
+// ✅ Show notification if redirected
+if (isset($_GET['requested'])) {
+    $notification = "Your request has been submitted.";
 }
 
-// Update remarks
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['remarks_submit'])) {
-    $remarks = $conn->real_escape_string($_POST['remarks']);
-    $cert_id = intval($_POST['certificate_id']);
-    $conn->query("UPDATE certificates SET remarks='$remarks' WHERE id=$cert_id");
-    echo "<script>location.href='certificates.php';</script>";
-    exit;
-}
+// ✅ Fetch existing requests
+$stmt = $conn->prepare("SELECT * FROM certificates WHERE resident_id = ? ORDER BY request_date DESC");
+$stmt->bind_param("i", $residentId);
+$stmt->execute();
+$result = $stmt->get_result();
+$requests = $result->fetch_all(MYSQLI_ASSOC);
+$stmt->close();
 
-// Fetch certificate requests
-$query = "
-    SELECT c.*, r.first_name, r.middle_name, r.last_name 
-    FROM certificates c 
-    JOIN residents r ON c.resident_id = r.id 
-    ORDER BY c.request_date DESC
-";
-$results = $conn->query($query);
+// ✅ Status-based notification
+if ($requests) {
+    $latest = $requests[0];
+    if ($latest['status'] === 'approved') {
+        $notification = "✅ Your certificate request has been approved!";
+    } elseif ($latest['status'] === 'denied') {
+        $notification = "❌ Your certificate request was denied.";
+    }
+}
 ?>
 
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Certificate Requests</title>
+    <title>Request Certificates</title>
     <style>
+        /* Your styling remains unchanged */
         body {
             margin: 0;
             font-family: Arial, sans-serif;
             display: flex;
-            background-color: #f0f0f5;
+            background-color: #f9f9f9;
         }
-
         .sidebar {
             width: 240px;
             background-color: #002855;
@@ -64,204 +75,212 @@ $results = $conn->query($query);
             height: 100vh;
             position: fixed;
         }
-
         .sidebar-header {
             background-color: #001f3f;
-            padding: 20px;
+            padding: 20px 15px;
             text-align: center;
         }
-
         .sidebar-header img {
             width: 60px;
+            height: 60px;
             border-radius: 50%;
             margin-bottom: 10px;
         }
-
         .sidebar-header h2 {
             font-size: 18px;
             margin: 0;
         }
-
         .sidebar a {
             display: block;
             color: white;
             text-decoration: none;
             padding: 14px 20px;
         }
-
         .sidebar a:hover,
         .sidebar a.active {
             background-color: #00509e;
         }
-
         .container {
             margin-left: 260px;
-            padding: 30px;
+            padding: 30px 40px;
+            max-width: 1000px;
             width: 100%;
         }
-
-        h1 {
-            margin-bottom: 20px;
+        .cert-buttons {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
         }
-
+        .cert-card {
+            flex: 1 1 30%;
+            background: #e9f0fa;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+        }
+        .cert-card h3 {
+            margin-bottom: 10px;
+        }
+        .cert-card form {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .cert-card textarea {
+            width: 90%;
+            height: 50px;
+            margin-bottom: 10px;
+            padding: 8px;
+        }
+        .cert-card button {
+            padding: 8px 16px;
+            border: none;
+            background: #004080;
+            color: white;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .cert-card button:hover {
+            background: #002855;
+        }
         table {
             width: 100%;
             border-collapse: collapse;
             background: white;
         }
-
         th, td {
-            padding: 12px;
             border: 1px solid #ccc;
-            vertical-align: top;
+            padding: 10px;
+            text-align: center;
         }
-
         th {
-            background-color: #004080;
+            background: #004080;
             color: white;
         }
-
-        img.certificate-image {
-            max-width: 200px;
-            height: auto;
-            border: 1px solid #ccc;
-        }
-
-        .btn {
-            padding: 6px 12px;
-            margin: 2px;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 14px;
-        }
-
-        .btn-approve { background-color: #28a745; color: white; }
-        .btn-deny { background-color: #dc3545; color: white; }
-        .btn-delete { background-color: #6c757d; color: white; }
-        .btn-save { background-color: #007bff; color: white; }
-        .btn-edit { background-color: #ffc107; color: black; }
-
+        .status-pending { color: orange; font-weight: bold; }
         .status-approved { color: green; font-weight: bold; }
         .status-denied { color: red; font-weight: bold; }
-        .status-pending { color: orange; font-weight: bold; }
-
-        .sidebar a span {
-            background-color: red;
+        .download-btn {
+            background: #007bff;
             color: white;
-            border-radius: 50%;
-            padding: 2px 6px;
-            font-size: 12px;
-            margin-left: 5px;
+            padding: 5px 10px;
+            border-radius: 4px;
+            text-decoration: none;
         }
-
-        .remarks-box {
-            width: 100%;
-            resize: vertical;
+        .download-btn:hover {
+            background: #0056b3;
         }
-
-        .remarks-buttons {
-            display: flex;
-            gap: 5px;
-            margin-top: 5px;
+        .notification {
+            padding: 10px 15px;
+            background-color: #d1ecf1;
+            color: #0c5460;
+            border-left: 5px solid #0c5460;
+            border-radius: 4px;
+            margin-bottom: 20px;
         }
     </style>
 </head>
 <body>
     <div class="sidebar">
         <div class="sidebar-header">
-            <img src="../images/bago_logo.png" alt="Logo">
-            <h2>Admin Panel</h2>
+            <img src="../images/bago_logo.png" alt="App Logo">
+            <h2>Residents Panel</h2>
         </div>
         <a href="dashboard.php">Dashboard</a>
-        <a href="residents.php">Residents</a>
-        <?php
-            $notifResult = $conn->query("SELECT COUNT(*) as total FROM certificates WHERE status = 'pending'");
-            $notifCount = $notifResult->fetch_assoc()['total'];
-        ?>
-        <a href="certificates.php" class="active">
-            Certificates
-            <?php if ($notifCount > 0): ?>
-                <span><?= $notifCount ?></span>
-            <?php endif; ?>
-        </a>
+        <a href="view_residents.php">View Residents</a>
+        <a href="certificates.php" class="active">Certificates</a>
         <a href="announcements.php">Announcements</a>
+        <a href="digital_id.php">View Digital ID</a>
         <a href="messages.php">Messages</a>
-        <a href="reports.php">Reports</a>
-        <a href="audit_trail.php">Audit Trail</a>
+        <a href="profile.php">My Profile</a>
         <a href="../logout.php">Logout</a>
     </div>
 
     <div class="container">
-        <h1>📄 Certificate Requests</h1>
+        <h1>📄 Request Certificate</h1>
+
+        <?php if ($notification): ?>
+            <div class="notification"><?= htmlspecialchars($notification) ?></div>
+        <?php endif; ?>
+
+        <div class="cert-buttons">
+            <?php
+            $types = ['Residency', 'Barangay Clearance', 'Indigency'];
+            foreach ($types as $type):
+            ?>
+            <div class="cert-card">
+                <h3><?= $type ?></h3>
+                <form method="POST">
+                    <textarea name="purpose" placeholder="Enter purpose" required></textarea>
+                    <input type="hidden" name="certificate_type" value="<?= $type ?>">
+                    <button type="submit">Request</button>
+                </form>
+            </div>
+            <?php endforeach; ?>
+        </div>
+
+        <h2>📁 My Certificate Requests</h2>
         <table>
             <thead>
                 <tr>
-                    <th>Resident</th>
                     <th>Type</th>
                     <th>Purpose</th>
-                    <th>Upload</th>
-                    <th>Remarks</th>
                     <th>Status</th>
-                    <th>Actions</th>
+                    <th>Request Date</th>
+                    <th>Admin Remarks</th>
+                    <th>Download</th>
                 </tr>
             </thead>
             <tbody>
-                <?php if ($results->num_rows > 0): ?>
-                    <?php while ($row = $results->fetch_assoc()): ?>
+                <?php if (count($requests) > 0): ?>
+                    <?php foreach ($requests as $req): ?>
                         <tr>
-                            <td><?= htmlspecialchars($row['first_name'] . ' ' . $row['middle_name'] . ' ' . $row['last_name']) ?></td>
-                            <td><?= htmlspecialchars($row['certificate_type']) ?></td>
-                            <td><?= htmlspecialchars($row['purpose']) ?></td>
+                            <td><?= htmlspecialchars($req['certificate_type']) ?></td>
+                            <td><?= htmlspecialchars($req['purpose']) ?></td>
+                            <td class="status-<?= $req['status'] ?>"><?= ucfirst($req['status']) ?></td>
+                            <td><?= date("M d, Y", strtotime($req['request_date'])) ?></td>
+                            <td><?= $req['remarks'] ? htmlspecialchars($req['remarks']) : '-' ?></td>
                             <td>
-                                <?php if ($row['status'] === 'denied'): ?>
-                                    <em>Denied. Cannot upload.</em>
-                                <?php elseif ($row['certificate_image']): ?>
-                                    <img src="../uploads/<?= htmlspecialchars($row['certificate_image']) ?>" class="certificate-image">
+                                <?php if ($req['status'] === 'approved' && $req['certificate_image']): ?>
+                                    <a class="download-btn" href="../uploads/<?= htmlspecialchars($req['certificate_image']) ?>" download>Download</a>
                                 <?php else: ?>
-                                    <form class="upload-form" action="upload_certificate.php" method="POST" enctype="multipart/form-data" onsubmit="setTimeout(() => location.reload(), 500);">
-                                        <input type="file" name="certificate_file" accept="image/*,application/pdf" required>
-                                        <input type="hidden" name="certificate_id" value="<?= $row['id'] ?>">
-                                        <button type="submit" class="btn btn-approve">Upload</button>
-                                    </form>
-                                <?php endif; ?>
-                            </td>
-                            <td>
-                                <form method="POST" class="remarks-form" id="remarks-form-<?= $row['id'] ?>">
-                                    <textarea id="remarks-<?= $row['id'] ?>" name="remarks" class="remarks-box" rows="2" disabled><?= htmlspecialchars($row['remarks']) ?></textarea>
-                                    <input type="hidden" name="certificate_id" value="<?= $row['id'] ?>">
-                                    <div class="remarks-buttons">
-                                        <button type="button" class="btn btn-edit" onclick="enableEdit(<?= $row['id'] ?>)">Edit</button>
-                                        <button type="submit" name="remarks_submit" id="save-btn-<?= $row['id'] ?>" class="btn btn-save" style="display: none;">Save</button>
-                                    </div>
-                                </form>
-                            </td>
-                            <td><span class="status-<?= $row['status'] ?>"><?= ucfirst($row['status']) ?></span></td>
-                            <td>
-                                <?php if ($row['status'] === 'pending'): ?>
-                                    <a href="?approve=<?= $row['id'] ?>" class="btn btn-approve" onclick="return confirm('Approve this request?')">Approve</a>
-                                    <a href="?deny=<?= $row['id'] ?>" class="btn btn-deny" onclick="return confirm('Deny this request?')">Deny</a>
-                                <?php else: ?>
-                                    <a href="?delete=<?= $row['id'] ?>" class="btn btn-delete" onclick="return confirm('Delete this request?')">Delete</a>
+                                    -
                                 <?php endif; ?>
                             </td>
                         </tr>
-                    <?php endwhile; ?>
+                    <?php endforeach; ?>
                 <?php else: ?>
-                    <tr><td colspan="7">No certificate requests found.</td></tr>
+                    <tr><td colspan="6">No certificate requests yet.</td></tr>
                 <?php endif; ?>
             </tbody>
         </table>
     </div>
 
     <script>
-        function enableEdit(id) {
-            const textarea = document.getElementById('remarks-' + id);
-            const saveBtn = document.getElementById('save-btn-' + id);
-            textarea.removeAttribute('disabled');
-            textarea.focus();
-            saveBtn.style.display = 'inline-block';
-        }
+        document.querySelectorAll("form").forEach(form => {
+            form.addEventListener("submit", function(e) {
+                const type = form.querySelector('input[name="certificate_type"]').value;
+                const purposeField = form.querySelector('textarea[name="purpose"]');
+                const purpose = purposeField.value.trim();
+                const button = form.querySelector("button");
+
+                if (!purpose) {
+                    alert("Please enter a purpose for your request.");
+                    e.preventDefault();
+                    return;
+                }
+
+                const confirmed = confirm("Are you sure you want to request a \"" + type + "\" certificate for:\n\n" + purpose + "?");
+                if (!confirmed) {
+                    e.preventDefault();
+                } else {
+                    button.disabled = true;
+                    button.textContent = "Requesting...";
+                }
+            });
+        });
     </script>
 </body>
 </html>
